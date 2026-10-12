@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero-knowledge file sharing</title>
+<style>
+:root{--bg:#eef2f5;--panel:#fff;--ink:#14212b;--mute:#5b6b78;--line:#d3dce3;--brand:#1f6f8b;--key:#a86a00;--keybg:#fff3d9;--ok:#1b7a4b;--bad:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1a22;--panel:#16252f;--ink:#e6eef3;--mute:#93a5b2;--line:#2a3d4a;--brand:#5cb8d6;--key:#f0b44c;--keybg:#3a2d12;--ok:#5fd397;--bad:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:620px;margin:0 auto;padding:36px 16px 48px}
+h1{font-size:1.6rem;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--mute);margin:0 0 20px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+.drop{display:block;border:2px dashed var(--line);border-radius:10px;padding:22px;text-align:center;cursor:pointer;margin-bottom:14px}
+.drop:hover,.drop:focus-within{border-color:var(--brand)}
+.drop input{position:absolute;opacity:0;width:1px;height:1px}
+.opts{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.opts label{flex:1;min-width:160px;font-size:.88rem;color:var(--mute)}
+select{display:block;width:100%;margin-top:4px;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit}
+button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:11px 18px;background:var(--brand);color:#fff;cursor:pointer}
+button.alt{background:transparent;color:var(--brand);border:1.5px solid var(--brand)}
+button:focus-visible,.drop:focus-within,select:focus-visible{outline:3px solid var(--key);outline-offset:2px}
+.status{margin-top:14px;min-height:1.5em;color:var(--mute)}
+.status.bad{color:var(--bad);font-weight:600}.status.good{color:var(--ok);font-weight:600}
+.linkbox{background:var(--keybg);border:1.5px solid var(--key);border-radius:8px;padding:10px 12px;margin:10px 0;font:.82rem ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+.note{font-size:.85rem;color:var(--mute);margin-top:18px}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Share a file the server can't read</h1>
+<p class="sub">Your file is encrypted in this browser before upload. The key stays in the link.</p>
+
+<div class="card">
+  <section id="up">
+    <label class="drop"><input id="file" type="file"><span id="dropTxt">Choose a file (up to 25 MB)</span></label>
+    <div class="opts">
+      <label>Link expires after
+        <select id="ttl"><option value="3600">1 hour</option><option value="86400">1 day</option><option value="604800">7 days</option></select></label>
+      <label>Allowed downloads
+        <select id="maxd"><option value="1">1 (one-time link)</option><option value="5">5</option><option value="10">10</option></select></label>
+    </div>
+    <button id="go">Encrypt and upload</button>
+    <div id="result" class="hide">
+      <div class="linkbox" id="link"></div>
+      <button id="copy" class="alt">Copy link</button>
+    </div>
+  </section>
+
+  <section id="down" class="hide">
+    <p>Someone shared a file with you. It will be downloaded and decrypted in this browser.</p>
+    <button id="dl">Download and decrypt</button>
+  </section>
+
+  <div id="status" class="status" role="status" aria-live="polite"></div>
+</div>
+<p class="note">The part of the link after the # is the decryption key. Browsers never send it to the server.</p>
+</main>
+
+<script>
+(function(){
+  var $=function(i){return document.getElementById(i)};
+  var enc=new TextEncoder(),dec=new TextDecoder(),MAX=25*1024*1024;
+  function b64u(buf){var s='',b=new Uint8Array(buf);for(var i=0;i<b.length;i++)s+=String.fromCharCode(b[i]);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
+  function unb64u(s){s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';var r=atob(s),u=new Uint8Array(r.length);for(var i=0;i<r.length;i++)u[i]=r.charCodeAt(i);return u}
+  function status(msg,kind){var s=$('status');s.textContent=msg;s.className='status '+(kind||'')}
+
+  var m=location.pathname.match(/^\/f\/([0-9a-f]{32})$/);
+  if(m){$('up').className='hide';$('down').className=''}
+
+  $('file').addEventListener('change',function(e){
+    var f=e.target.files[0];
+    $('dropTxt').textContent=f?f.name+' ('+(f.size/1024).toFixed(1)+' KB)':'Choose a file (up to 25 MB)';
+  });
+
+  $('go').addEventListener('click',async function(){
+    var f=$('file').files[0];
+    if(!f){status('Choose a file first.','bad');return}
+    if(f.size>MAX-1024){status('File is too large. The limit is 25 MB.','bad');return}
+    try{
+      status('Encrypting in your browser...');
+      // Plaintext = 2-byte name length + file name + file bytes, so the server never learns the name.
+      var name=enc.encode(f.name).slice(0,255);
+      var body=new Uint8Array(2+name.length+f.size);
+      new DataView(body.buffer).setUint16(0,name.length);
+      body.set(name,2);
+      body.set(new Uint8Array(await f.arrayBuffer()),2+name.length);
+      var key=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt']);
+      var iv=crypto.getRandomValues(new Uint8Array(12));
+      var ct=new Uint8Array(await crypto.subtle.encrypt({name:'AES-GCM',iv:iv},key,body));
+      var blob=new Uint8Array(12+ct.length);blob.set(iv);blob.set(ct,12);
+
+      status('Uploading encrypted data...');
+      var r=await fetch('/api/files?ttl='+$('ttl').value+'&max_downloads='+$('maxd').value,
+        {method:'POST',headers:{'Content-Type':'application/octet-stream'},body:blob});
+      if(!r.ok)throw new Error(r.status===429?'Too many requests. Wait a minute and try again.':
+        r.status===413?'File is too large. The limit is 25 MB.':'Upload failed (error '+r.status+').');
+      var id=(await r.json()).id;
+      var keyStr=b64u(await crypto.subtle.exportKey('raw',key));
+      $('link').textContent=location.origin+'/f/'+id+'#'+keyStr;
+      $('result').className='';
+      status('Done. Send this link to the receiver.','good');
+    }catch(err){status(err.message,'bad')}
+  });
+
+  $('copy').addEventListener('click',async function(){
+    try{await navigator.clipboard.writeText($('link').textContent);status('Link copied.','good')}
+    catch(e){status('Copy failed. Select the link and copy it by hand.','bad')}
+  });
+
+  $('dl').addEventListener('click',async function(){
+    var keyStr=location.hash.slice(1);
+    if(!keyStr){status('This link is missing its key (the part after #). Ask the sender for the full link.','bad');return}
+    try{
+      status('Fetching encrypted data...');
+      var r=await fetch('/api/files/'+m[1]);
+      if(r.status===404)throw new Error('This link has expired or was already used.');
+      if(!r.ok)throw new Error('Download failed (error '+r.status+').');
+      var data=new Uint8Array(await r.arrayBuffer());
+      status('Decrypting in your browser...');
+      var plain;
+      try{
+        var key=await crypto.subtle.importKey('raw',unb64u(keyStr),'AES-GCM',false,['decrypt']);
+        plain=new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv:data.slice(0,12)},key,data.slice(12)));
+      }catch(_){throw new Error('Could not decrypt. The key is wrong or the data was changed.')}
+      var n=new DataView(plain.buffer).getUint16(0);
+      var fname=dec.decode(plain.slice(2,2+n))||'download';
+      var a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob([plain.slice(2+n)]));
+      a.download=fname;
+      document.body.appendChild(a);a.click();a.remove();
+      status('Decrypted. Saved as '+fname+'.','good');
+    }catch(err){status(err.message,'bad')}
+  });
+})();
+</script>
+</body>
+</html>
